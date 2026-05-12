@@ -600,15 +600,6 @@ body {
   color: var(--red);
 }
 
-.detail-thru {
-  font-weight: 400;
-  font-size: 0.7rem;
-  color: var(--gray-500);
-  width: 52px;
-  text-align: left;
-  margin-left: 6px;
-}
-
 .roster-detail-divider {
   font-size: 0.75rem;
   text-transform: uppercase;

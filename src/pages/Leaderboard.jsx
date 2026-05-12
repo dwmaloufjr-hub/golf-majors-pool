@@ -58,18 +58,6 @@ export default function Leaderboard() {
       .from('tournament_players')
       .select('*');
 
-    // Fetch scores to calculate holes played per player per tournament
-    const { data: scoresData } = await supabase
-      .from('scores')
-      .select('tournament_id, player_id, round, hole');
-
-    // Build playerThru: { `${tournamentId}-${playerId}`: holesPlayed }
-    const playerThru = {};
-    (scoresData || []).forEach((s) => {
-      const key = `${s.tournament_id}-${s.player_id}`;
-      playerThru[key] = (playerThru[key] || 0) + 1;
-    });
-
     setTournamentPlayers(tpData || []);
 
     const userStandings = users.map((u) => {
@@ -97,12 +85,10 @@ export default function Leaderboard() {
           tournamentBreakdown[tp.tournament_id] += pts;
 
           if (!playerPoints[tp.player_id]) {
-            playerPoints[tp.player_id] = { total: 0, byTournament: {}, thruByTournament: {} };
+            playerPoints[tp.player_id] = { total: 0, byTournament: {} };
           }
           playerPoints[tp.player_id].total += pts;
           playerPoints[tp.player_id].byTournament[tp.tournament_id] = pts;
-          playerPoints[tp.player_id].thruByTournament[tp.tournament_id] =
-            playerThru[`${tp.tournament_id}-${tp.player_id}`] || 0;
         }
       });
 
@@ -194,12 +180,6 @@ export default function Leaderboard() {
                             ? pp?.total || 0
                             : pp?.byTournament[selectedTournament] || 0;
 
-                        // Calculate total holes played across tournaments
-                        const playerHolesThru =
-                          selectedTournament === 'all'
-                            ? Object.values(pp?.thruByTournament || {}).reduce((a, b) => a + b, 0)
-                            : pp?.thruByTournament?.[selectedTournament] || 0;
-
                         // Find tournament_player data for position info
                         const tpInfo = selectedTournament !== 'all'
                           ? tournamentPlayers.find(
@@ -226,9 +206,6 @@ export default function Leaderboard() {
                               <span className="detail-price">${r.player?.price}</span>
                               <span className={`detail-points ${playerPts > 0 ? 'positive' : playerPts < 0 ? 'negative' : ''}`}>
                                 {playerPts > 0 ? '+' : ''}{playerPts.toFixed(1)}
-                                {playerHolesThru > 0 && (
-                                  <span className="detail-thru"> thru {playerHolesThru}</span>
-                                )}
                               </span>
                             </span>
                           </div>
