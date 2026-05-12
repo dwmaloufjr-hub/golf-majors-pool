@@ -34,7 +34,7 @@ export default function Login() {
   return (
     <div className="login-page">
       <div className="login-card">
-        <h1>⛳ Majors Pool 2026</h1>
+        <h1>⛳ Eas'mo Majors Pool 2026</h1>
         <h2>{isSignUp ? 'Create Account' : 'Sign In'}</h2>
 
         {error && <div className="error-msg">{error}</div>}

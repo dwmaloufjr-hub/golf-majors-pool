@@ -7,6 +7,7 @@ import Draft from './pages/Draft';
 import Leaderboard from './pages/Leaderboard';
 import Rosters from './pages/Rosters';
 import Substitutions from './pages/Substitutions';
+import Scoring from './pages/Scoring';
 
 function AppLayout({ children }) {
   return (
@@ -52,6 +53,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <AppLayout><Substitutions /></AppLayout>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/scoring"
+            element={
+              <ProtectedRoute>
+                <AppLayout><Scoring /></AppLayout>
               </ProtectedRoute>
             }
           />

@@ -5,22 +5,29 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const DATAGOLF_API_KEY = process.env.DATAGOLF_API_KEY;
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
+const RAPIDAPI_HOST = process.env.RAPIDAPI_HOST;
 
-// Scoring rules per hole
+// Slash Golf tournament IDs for majors
+const SLASH_GOLF_TOURNS = {
+  'Masters': '014',
+  'PGA Championship': '033',
+  'U.S. Open': '026',
+  'Open Championship': '100',
+};
+
 function holePoints(scoreVsPar) {
   switch (scoreVsPar) {
-    case -3: return 20;   // Double eagle / albatross
-    case -2: return 8;    // Eagle
-    case -1: return 3;    // Birdie
-    case 0:  return 0.5;  // Par
-    case 1:  return -0.5; // Bogey
-    case 2:  return -1;   // Double bogey
-    default: return scoreVsPar < -3 ? 20 : -1; // Better than double eagle or worse than double bogey
+    case -3: return 20;
+    case -2: return 8;
+    case -1: return 3;
+    case 0:  return 0.5;
+    case 1:  return -0.5;
+    case 2:  return -1;
+    default: return scoreVsPar < -3 ? 20 : -1;
   }
 }
 
-// Finish position bonus
 function finishBonus(position) {
   if (!position || position <= 0) return 0;
   const bonuses = { 1: 30, 2: 20, 3: 18, 4: 16, 5: 14, 6: 12, 7: 10, 8: 9, 9: 8, 10: 7 };
@@ -34,7 +41,6 @@ function finishBonus(position) {
   return 0;
 }
 
-// Calculate streak bonuses for a round
 function streakBonuses(holes) {
   let bonus = 0;
   let birdieStreak = 0;
@@ -42,32 +48,50 @@ function streakBonuses(holes) {
   let hasBogey = false;
 
   for (const hole of holes) {
-    if (hole.score_vs_par <= -1) {
+    if (hole.scoreVsPar <= -1) {
       birdieStreak++;
       if (birdieStreak >= 3 && !hasBirdieStreakBonus) {
-        bonus += 3; // 3+ birdie streak, max 1 per round
+        bonus += 3;
         hasBirdieStreakBonus = true;
       }
     } else {
       birdieStreak = 0;
     }
-
-    if (hole.score_vs_par >= 1) hasBogey = true;
-
-    // Hole in one (par 3, score_vs_par = -2 means eagle on par 3 = hole in one)
-    // We'll check for ace via score_vs_par on par 3s, but we don't have par info
-    // So we'll use a simpler heuristic: any hole with score_vs_par <= -3 on a likely par 3
-    // For now, we'll flag aces if the score is 1 (handled separately if we get raw scores)
+    if (hole.scoreVsPar >= 1) hasBogey = true;
   }
 
-  // Bogey-free round (all 18 holes played, no bogeys)
   if (!hasBogey && holes.length === 18) bonus += 3;
-
   return bonus;
 }
 
+function parseNum(val) {
+  if (val === null || val === undefined) return null;
+  if (typeof val === 'number') return val;
+  if (typeof val === 'object' && val.$numberInt) return parseInt(val.$numberInt, 10);
+  if (typeof val === 'string') return parseInt(val, 10);
+  return null;
+}
+
+function normalizeName(str) {
+  return str
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/ø/g, 'o').replace(/Ø/g, 'o')
+    .replace(/æ/g, 'ae').replace(/Æ/g, 'ae')
+    .toLowerCase();
+}
+
+async function slashGolfFetch(endpoint, params) {
+  const url = new URL(`https://${RAPIDAPI_HOST}${endpoint}`);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  const res = await fetch(url.toString(), {
+    headers: { 'X-RapidAPI-Key': RAPIDAPI_KEY, 'X-RapidAPI-Host': RAPIDAPI_HOST },
+  });
+  if (!res.ok) throw new Error(`Slash Golf API error: ${res.status}`);
+  return res.json();
+}
+
 export default async function handler(req) {
-  // Only allow POST or scheduled invocation
   if (req.method !== 'POST' && req.method !== 'GET') {
     return new Response('Method not allowed', { status: 405 });
   }
@@ -84,115 +108,172 @@ export default async function handler(req) {
       return Response.json({ message: 'No active tournament' });
     }
 
-    // Fetch live stats from Data Golf
-    const statsUrl = `https://feeds.datagolf.com/preds/live-tournament-stats?file_format=json&key=${DATAGOLF_API_KEY}`;
-    const statsRes = await fetch(statsUrl);
-    if (!statsRes.ok) throw new Error(`Data Golf stats API error: ${statsRes.status}`);
-    const statsData = await statsRes.json();
+    const slashTournId = SLASH_GOLF_TOURNS[activeTournament.name];
+    if (!slashTournId) {
+      return Response.json({ message: `No Slash Golf mapping for ${activeTournament.name}` });
+    }
 
-    // Fetch live scoring
-    const liveUrl = `https://feeds.datagolf.com/preds/in-play?tour=pga&file_format=json&key=${DATAGOLF_API_KEY}`;
-    const liveRes = await fetch(liveUrl);
-    if (!liveRes.ok) throw new Error(`Data Golf live API error: ${liveRes.status}`);
-    const liveData = await liveRes.json();
+    const year = new Date(activeTournament.start_date).getFullYear().toString();
 
-    // Get our player mapping (dg_id -> uuid)
-    const { data: players } = await supabase.from('players').select('id, dg_id');
-    const playerMap = {};
-    (players || []).forEach((p) => { playerMap[p.dg_id] = p.id; });
+    // Fetch leaderboard and DB data in parallel
+    const [leaderboard, { data: dbPlayers }, { data: rosters }] = await Promise.all([
+      slashGolfFetch('/leaderboard', { orgId: '1', tournId: slashTournId, year }),
+      supabase.from('players').select('id, dg_id, name'),
+      supabase.from('rosters').select('player_id'),
+    ]);
 
-    // Process live scoring data
-    const scorecards = statsData.live_stats || statsData.data || [];
-    let scoresUpserted = 0;
-    let playersUpdated = 0;
+    const rows = leaderboard.leaderboardRows || [];
+    if (rows.length === 0) return Response.json({ message: 'No leaderboard data' });
+    if (!dbPlayers?.length) return Response.json({ message: 'No players in database' });
 
-    for (const card of scorecards) {
-      const playerId = playerMap[card.dg_id];
-      if (!playerId) continue;
+    // Get set of rostered player IDs (only fetch scorecards for these)
+    const rosteredPlayerIds = new Set((rosters || []).map((r) => r.player_id));
 
-      // Process hole-by-hole scores if available
-      if (card.round_scores || card.hole_scores) {
-        const roundScores = card.round_scores || card.hole_scores;
+    // Build name maps
+    const nameToDbPlayer = {};
+    const lastNameToDbPlayers = {};
+    for (const p of dbPlayers) {
+      nameToDbPlayer[normalizeName(p.name)] = p;
+      const lastName = normalizeName(p.name.split(',')[0].trim());
+      if (!lastNameToDbPlayers[lastName]) lastNameToDbPlayers[lastName] = [];
+      lastNameToDbPlayers[lastName].push(p);
+    }
 
-        for (const [roundKey, holes] of Object.entries(roundScores)) {
-          const roundNum = parseInt(roundKey.replace('R', '').replace('round', ''), 10);
-          if (isNaN(roundNum) || roundNum < 1 || roundNum > 4) continue;
+    // Match leaderboard to DB, filter to rostered players only
+    const matchedPlayers = [];
+    for (const row of rows) {
+      const nameKey = normalizeName(`${row.lastName}, ${row.firstName}`);
+      let dbPlayer = nameToDbPlayer[nameKey];
 
-          if (Array.isArray(holes)) {
-            for (let i = 0; i < holes.length; i++) {
-              const scoreVsPar = holes[i];
-              if (scoreVsPar === null || scoreVsPar === undefined) continue;
-
-              const points = holePoints(scoreVsPar);
-              const { error } = await supabase.from('scores').upsert(
-                {
-                  tournament_id: activeTournament.id,
-                  player_id: playerId,
-                  round: roundNum,
-                  hole: i + 1,
-                  score_vs_par: scoreVsPar,
-                  points,
-                },
-                { onConflict: 'tournament_id,player_id,round,hole' }
-              );
-              if (!error) scoresUpserted++;
-            }
+      if (!dbPlayer) {
+        const lastName = normalizeName(row.lastName);
+        const firstName = normalizeName(row.firstName);
+        const candidates = lastNameToDbPlayers[lastName] || [];
+        for (const c of candidates) {
+          const cFirst = normalizeName(c.name.split(',')[1]?.trim() || '');
+          if (cFirst.startsWith(firstName) || firstName.startsWith(cFirst)) {
+            dbPlayer = c;
+            break;
           }
         }
       }
 
-      // Update tournament_players with current status
-      const cutMade = card.made_cut !== undefined ? card.made_cut : null;
-      const finishPos = card.fin_pos || card.position || null;
+      if (dbPlayer && rosteredPlayerIds.has(dbPlayer.id)) {
+        matchedPlayers.push({
+          dbPlayer,
+          slashPlayerId: row.playerId,
+          position: row.position,
+          thru: row.thru,
+          status: row.status,
+          total: row.total,
+        });
+      }
+    }
 
-      // Calculate total points from all scores for this player
-      const { data: playerScores } = await supabase
-        .from('scores')
-        .select('*')
-        .eq('tournament_id', activeTournament.id)
-        .eq('player_id', playerId)
-        .order('round')
-        .order('hole');
+    let scoresUpserted = 0;
+    let playersUpdated = 0;
 
-      let totalPoints = 0;
-      if (playerScores) {
-        totalPoints = playerScores.reduce((sum, s) => sum + Number(s.points), 0);
+    // Fetch scorecards in parallel batches of 5
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < matchedPlayers.length; i += BATCH_SIZE) {
+      const batch = matchedPlayers.slice(i, i + BATCH_SIZE);
 
-        // Add streak bonuses per round
+      const scorecardResults = await Promise.allSettled(
+        batch.map((mp) =>
+          slashGolfFetch('/scorecard', {
+            orgId: '1',
+            tournId: slashTournId,
+            year,
+            playerId: mp.slashPlayerId,
+          }).then((data) => ({ mp, data }))
+        )
+      );
+
+      for (const result of scorecardResults) {
+        if (result.status !== 'fulfilled') continue;
+        const { mp, data: scorecardData } = result.value;
+
+        const rounds = Array.isArray(scorecardData) ? scorecardData : [];
+        const scoreRows = [];
+
+        for (const round of rounds) {
+          const roundNum = parseNum(round.roundId);
+          if (!roundNum || roundNum < 1 || roundNum > 4) continue;
+
+          const holes = round.holes || {};
+          for (const [holeKey, holeData] of Object.entries(holes)) {
+            const holeNum = parseNum(holeData.holeId) || parseInt(holeKey, 10);
+            const holeScore = parseNum(holeData.holeScore);
+            const par = parseNum(holeData.par);
+            if (holeScore === null || par === null) continue;
+
+            const scoreVsPar = holeScore - par;
+            scoreRows.push({
+              tournament_id: activeTournament.id,
+              player_id: mp.dbPlayer.id,
+              round: roundNum,
+              hole: holeNum,
+              score_vs_par: scoreVsPar,
+              points: holePoints(scoreVsPar),
+            });
+          }
+        }
+
+        // Batch upsert all scores for this player
+        if (scoreRows.length > 0) {
+          const { error } = await supabase
+            .from('scores')
+            .upsert(scoreRows, { onConflict: 'tournament_id,player_id,round,hole' });
+          if (!error) scoresUpserted += scoreRows.length;
+        }
+
+        // Calculate total points
+        let totalPoints = scoreRows.reduce((sum, s) => sum + s.points, 0);
+
+        // Streak bonuses per round
         const roundGroups = {};
-        playerScores.forEach((s) => {
+        scoreRows.forEach((s) => {
           if (!roundGroups[s.round]) roundGroups[s.round] = [];
-          roundGroups[s.round].push(s);
+          roundGroups[s.round].push({ scoreVsPar: s.score_vs_par });
         });
         for (const holes of Object.values(roundGroups)) {
           holes.sort((a, b) => a.hole - b.hole);
           totalPoints += streakBonuses(holes);
         }
-      }
 
-      // Add finish bonus
-      if (finishPos) {
-        const pos = typeof finishPos === 'string' ? parseInt(finishPos.replace('T', ''), 10) : finishPos;
-        totalPoints += finishBonus(pos);
-      }
+        // Position + finish bonus
+        const posStr = mp.position;
+        let posNum = null;
+        if (posStr && posStr !== '-') {
+          posNum = parseInt(String(posStr).replace('T', ''), 10);
+        }
 
-      const { error: tpError } = await supabase.from('tournament_players').upsert(
-        {
-          tournament_id: activeTournament.id,
-          player_id: playerId,
-          in_field: true,
-          cut_made: cutMade,
-          finish_position: typeof finishPos === 'string' ? parseInt(finishPos.replace('T', ''), 10) : finishPos,
-          total_points: totalPoints,
-        },
-        { onConflict: 'tournament_id,player_id' }
-      );
-      if (!tpError) playersUpdated++;
+        const isTournamentDone = leaderboard.status === 'Complete' || leaderboard.status === 'Official';
+        if (isTournamentDone && posNum) {
+          totalPoints += finishBonus(posNum);
+        }
+
+        const cutMade = mp.status === 'cut' ? false : (mp.status === 'active' || mp.status === 'complete') ? true : null;
+
+        const { error: tpError } = await supabase.from('tournament_players').upsert(
+          {
+            tournament_id: activeTournament.id,
+            player_id: mp.dbPlayer.id,
+            in_field: true,
+            cut_made: cutMade,
+            finish_position: posNum,
+            total_points: totalPoints,
+          },
+          { onConflict: 'tournament_id,player_id' }
+        );
+        if (!tpError) playersUpdated++;
+      }
     }
 
     return Response.json({
       success: true,
       tournament: activeTournament.name,
+      playersMatched: matchedPlayers.length,
       scoresUpserted,
       playersUpdated,
       timestamp: new Date().toISOString(),
@@ -204,6 +285,5 @@ export default async function handler(req) {
 }
 
 export const config = {
-  // Run every 5 minutes during tournaments
   schedule: '*/5 * * * *',
 };

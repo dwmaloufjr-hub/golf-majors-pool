@@ -35,23 +35,32 @@ export function AuthProvider({ children }) {
       .select('*')
       .eq('id', userId)
       .single();
-    setProfile(data);
+
+    if (data) {
+      setProfile(data);
+    } else {
+      // Profile doesn't exist yet — create it (first sign-in after signup)
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const displayName = user.user_metadata?.display_name || user.email?.split('@')[0] || 'Player';
+        const { data: newProfile } = await supabase.from('users').upsert({
+          id: user.id,
+          email: user.email,
+          display_name: displayName,
+        }, { onConflict: 'id' }).select().single();
+        setProfile(newProfile);
+      }
+    }
     setLoading(false);
   }
 
   async function signUp(email, password, displayName) {
-    const { data, error } = await supabase.auth.signUp({ email, password });
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { display_name: displayName } },
+    });
     if (error) throw error;
-
-    // Create profile
-    if (data.user) {
-      const { error: profileError } = await supabase.from('users').insert({
-        id: data.user.id,
-        email,
-        display_name: displayName,
-      });
-      if (profileError) throw profileError;
-    }
     return data;
   }
 

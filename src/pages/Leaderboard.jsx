@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
+import { useAuth } from '../context/AuthContext';
 
 export default function Leaderboard() {
   const [standings, setStandings] = useState([]);
@@ -8,11 +9,26 @@ export default function Leaderboard() {
   const [expandedUser, setExpandedUser] = useState(null);
   const [tournamentPlayers, setTournamentPlayers] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [draftRevealed, setDraftRevealed] = useState(false);
+  const { profile } = useAuth();
 
   useEffect(() => {
+    checkDraftDeadline();
     fetchTournaments();
     fetchStandings();
   }, []);
+
+  async function checkDraftDeadline() {
+    const { data: masters } = await supabase
+      .from('tournaments')
+      .select('draft_deadline')
+      .eq('name', 'Masters')
+      .single();
+
+    if (masters?.draft_deadline && new Date() > new Date(masters.draft_deadline)) {
+      setDraftRevealed(true);
+    }
+  }
 
   async function fetchTournaments() {
     const { data } = await supabase
@@ -42,6 +58,18 @@ export default function Leaderboard() {
       .from('tournament_players')
       .select('*');
 
+    // Fetch scores to calculate holes played per player per tournament
+    const { data: scoresData } = await supabase
+      .from('scores')
+      .select('tournament_id, player_id, round, hole');
+
+    // Build playerThru: { `${tournamentId}-${playerId}`: holesPlayed }
+    const playerThru = {};
+    (scoresData || []).forEach((s) => {
+      const key = `${s.tournament_id}-${s.player_id}`;
+      playerThru[key] = (playerThru[key] || 0) + 1;
+    });
+
     setTournamentPlayers(tpData || []);
 
     const userStandings = users.map((u) => {
@@ -69,10 +97,12 @@ export default function Leaderboard() {
           tournamentBreakdown[tp.tournament_id] += pts;
 
           if (!playerPoints[tp.player_id]) {
-            playerPoints[tp.player_id] = { total: 0, byTournament: {} };
+            playerPoints[tp.player_id] = { total: 0, byTournament: {}, thruByTournament: {} };
           }
           playerPoints[tp.player_id].total += pts;
           playerPoints[tp.player_id].byTournament[tp.tournament_id] = pts;
+          playerPoints[tp.player_id].thruByTournament[tp.tournament_id] =
+            playerThru[`${tp.tournament_id}-${tp.player_id}`] || 0;
         }
       });
 
@@ -139,18 +169,21 @@ export default function Leaderboard() {
             return (
               <div key={entry.id}>
                 <div
-                  className={`standings-row ${expandedUser === entry.id ? 'expanded' : ''}`}
-                  onClick={() =>
-                    setExpandedUser(expandedUser === entry.id ? null : entry.id)
-                  }
+                  className={`standings-row ${expandedUser === entry.id ? 'expanded' : ''} ${!draftRevealed && entry.id !== profile?.id ? 'no-expand' : ''}`}
+                  onClick={() => {
+                    if (!draftRevealed && entry.id !== profile?.id) return;
+                    setExpandedUser(expandedUser === entry.id ? null : entry.id);
+                  }}
                 >
                   <span className="rank">{i + 1}</span>
                   <span className="name">{entry.display_name}</span>
-                  <span className="players-count">{entry.playerCount}</span>
+                  <span className="players-count">
+                    {draftRevealed || entry.id === profile?.id ? entry.playerCount : '?'}
+                  </span>
                   <span className="points">{points.toFixed(1)}</span>
                 </div>
 
-                {expandedUser === entry.id && (
+                {expandedUser === entry.id && (draftRevealed || entry.id === profile?.id) && (
                   <div className="roster-detail">
                     {entry.originalPicks
                       .sort((a, b) => (b.player?.price || 0) - (a.player?.price || 0))
@@ -160,6 +193,12 @@ export default function Leaderboard() {
                           selectedTournament === 'all'
                             ? pp?.total || 0
                             : pp?.byTournament[selectedTournament] || 0;
+
+                        // Calculate total holes played across tournaments
+                        const playerHolesThru =
+                          selectedTournament === 'all'
+                            ? Object.values(pp?.thruByTournament || {}).reduce((a, b) => a + b, 0)
+                            : pp?.thruByTournament?.[selectedTournament] || 0;
 
                         // Find tournament_player data for position info
                         const tpInfo = selectedTournament !== 'all'
@@ -187,6 +226,9 @@ export default function Leaderboard() {
                               <span className="detail-price">${r.player?.price}</span>
                               <span className={`detail-points ${playerPts > 0 ? 'positive' : playerPts < 0 ? 'negative' : ''}`}>
                                 {playerPts > 0 ? '+' : ''}{playerPts.toFixed(1)}
+                                {playerHolesThru > 0 && (
+                                  <span className="detail-thru"> thru {playerHolesThru}</span>
+                                )}
                               </span>
                             </span>
                           </div>

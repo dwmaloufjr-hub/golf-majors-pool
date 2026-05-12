@@ -29,21 +29,21 @@ function oddsToProb(oddsStr) {
   return Math.abs(odds) / (Math.abs(odds) + 100);
 }
 
-// Price tiers based on win probability ranking
+// Price tiers based on win probability ranking (20% increase)
 function calculatePrice(rank) {
-  if (rank <= 2) return 30;
-  if (rank <= 4) return 25;
-  if (rank <= 6) return 22;
-  if (rank <= 8) return 19;
-  if (rank <= 10) return 17;
-  if (rank <= 13) return 15;
-  if (rank <= 16) return 13;
-  if (rank <= 20) return 11;
-  if (rank <= 25) return 9;
-  if (rank <= 30) return 7;
-  if (rank <= 40) return 5;
-  if (rank <= 50) return 4;
-  if (rank <= 60) return 3;
+  if (rank <= 2) return 36;
+  if (rank <= 4) return 30;
+  if (rank <= 6) return 26;
+  if (rank <= 8) return 23;
+  if (rank <= 10) return 20;
+  if (rank <= 13) return 18;
+  if (rank <= 16) return 16;
+  if (rank <= 20) return 13;
+  if (rank <= 25) return 11;
+  if (rank <= 30) return 8;
+  if (rank <= 40) return 6;
+  if (rank <= 50) return 5;
+  if (rank <= 60) return 4;
   if (rank <= 75) return 2;
   return 1;
 }

@@ -7,13 +7,14 @@ export default function Nav() {
   return (
     <nav className="main-nav">
       <div className="nav-brand">
-        <NavLink to="/">⛳ Majors Pool</NavLink>
+        <NavLink to="/">⛳ Eas'mo Majors Pool</NavLink>
       </div>
       <div className="nav-links">
         <NavLink to="/">Leaderboard</NavLink>
         <NavLink to="/draft">Draft</NavLink>
         <NavLink to="/rosters">Rosters</NavLink>
         <NavLink to="/subs">Subs</NavLink>
+        <NavLink to="/scoring">Scoring</NavLink>
       </div>
       <div className="nav-user">
         {profile && (

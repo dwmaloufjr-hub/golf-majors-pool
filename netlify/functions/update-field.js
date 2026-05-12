@@ -5,13 +5,35 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const DATAGOLF_API_KEY = process.env.DATAGOLF_API_KEY;
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
+const RAPIDAPI_HOST = process.env.RAPIDAPI_HOST;
 
-/**
- * Updates the tournament_players table with the current field for the active tournament.
- * Run this before each major starts to populate who is playing.
- * Also useful for detecting withdrawals before Round 1.
- */
+const SLASH_GOLF_TOURNS = {
+  'Masters': '014',
+  'PGA Championship': '033',
+  'U.S. Open': '026',
+  'Open Championship': '100',
+};
+
+function normalizeName(str) {
+  return str
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/ø/g, 'o').replace(/Ø/g, 'o')
+    .replace(/æ/g, 'ae').replace(/Æ/g, 'ae')
+    .toLowerCase();
+}
+
+async function slashGolfFetch(endpoint, params) {
+  const url = new URL(`https://${RAPIDAPI_HOST}${endpoint}`);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  const res = await fetch(url.toString(), {
+    headers: { 'X-RapidAPI-Key': RAPIDAPI_KEY, 'X-RapidAPI-Host': RAPIDAPI_HOST },
+  });
+  if (!res.ok) throw new Error(`Slash Golf API error: ${res.status}`);
+  return res.json();
+}
+
 export default async function handler(req) {
   try {
     // Find the next upcoming or in_progress tournament
@@ -27,33 +49,64 @@ export default async function handler(req) {
       return Response.json({ message: 'No upcoming tournament' });
     }
 
-    // Fetch current field from Data Golf
-    const url = `https://feeds.datagolf.com/field-updates?tour=pga&file_format=json&key=${DATAGOLF_API_KEY}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Data Golf API error: ${res.status}`);
-    const data = await res.json();
+    const slashTournId = SLASH_GOLF_TOURNS[tournament.name];
+    if (!slashTournId) {
+      return Response.json({ message: `No Slash Golf mapping for ${tournament.name}` });
+    }
 
-    const field = data.field || data;
-    if (!Array.isArray(field)) throw new Error('Unexpected field data structure');
+    const year = new Date(tournament.start_date).getFullYear().toString();
+
+    // Fetch leaderboard/field from Slash Golf
+    const leaderboard = await slashGolfFetch('/leaderboard', {
+      orgId: '1',
+      tournId: slashTournId,
+      year,
+    });
+
+    const rows = leaderboard.leaderboardRows || [];
+    if (rows.length === 0) {
+      return Response.json({ message: 'No field data available' });
+    }
 
     // Get our player mapping
-    const { data: players } = await supabase.from('players').select('id, dg_id');
-    const playerMap = {};
-    (players || []).forEach((p) => { playerMap[p.dg_id] = p.id; });
+    const { data: players } = await supabase.from('players').select('id, name');
+    const nameToPlayer = {};
+    const lastNameToPlayers = {};
+    for (const p of players || []) {
+      nameToPlayer[normalizeName(p.name)] = p;
+      const lastName = normalizeName(p.name.split(',')[0].trim());
+      if (!lastNameToPlayers[lastName]) lastNameToPlayers[lastName] = [];
+      lastNameToPlayers[lastName].push(p);
+    }
 
     let updated = 0;
     const fieldPlayerIds = [];
 
-    for (const entry of field) {
-      const playerId = playerMap[entry.dg_id];
-      if (!playerId) continue;
+    for (const row of rows) {
+      const nameKey = normalizeName(`${row.lastName}, ${row.firstName}`);
+      let dbPlayer = nameToPlayer[nameKey];
 
-      fieldPlayerIds.push(playerId);
+      if (!dbPlayer) {
+        const lastName = normalizeName(row.lastName);
+        const firstName = normalizeName(row.firstName);
+        const candidates = lastNameToPlayers[lastName] || [];
+        for (const c of candidates) {
+          const cFirst = normalizeName(c.name.split(',')[1]?.trim() || '');
+          if (cFirst.startsWith(firstName) || firstName.startsWith(cFirst)) {
+            dbPlayer = c;
+            break;
+          }
+        }
+      }
+
+      if (!dbPlayer) continue;
+
+      fieldPlayerIds.push(dbPlayer.id);
 
       const { error } = await supabase.from('tournament_players').upsert(
         {
           tournament_id: tournament.id,
-          player_id: playerId,
+          player_id: dbPlayer.id,
           in_field: true,
         },
         { onConflict: 'tournament_id,player_id' }
@@ -74,6 +127,7 @@ export default async function handler(req) {
       success: true,
       tournament: tournament.name,
       playersInField: updated,
+      totalFieldSize: rows.length,
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
