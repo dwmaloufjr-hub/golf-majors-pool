@@ -5,15 +5,8 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
-const RAPIDAPI_HOST = process.env.RAPIDAPI_HOST;
-
-const SLASH_GOLF_TOURNS = {
-  'Masters': '014',
-  'PGA Championship': '033',
-  'U.S. Open': '026',
-  'Open Championship': '100',
-};
+const ESPN_BASE = 'https://sports.core.api.espn.com/v2/sports/golf/leagues/pga';
+const ESPN_SCOREBOARD = 'https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard';
 
 function normalizeName(str) {
   return str
@@ -24,14 +17,36 @@ function normalizeName(str) {
     .toLowerCase();
 }
 
-async function slashGolfFetch(endpoint, params) {
-  const url = new URL(`https://${RAPIDAPI_HOST}${endpoint}`);
-  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  const res = await fetch(url.toString(), {
-    headers: { 'X-RapidAPI-Key': RAPIDAPI_KEY, 'X-RapidAPI-Host': RAPIDAPI_HOST },
-  });
-  if (!res.ok) throw new Error(`Slash Golf API error: ${res.status}`);
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`ESPN API error: ${res.status} for ${url}`);
   return res.json();
+}
+
+async function findEspnEventId(tournamentName, startDate) {
+  const dateStr = startDate.replace(/-/g, '');
+  const endDate = new Date(startDate);
+  endDate.setDate(endDate.getDate() + 6);
+  const endStr = endDate.toISOString().slice(0, 10).replace(/-/g, '');
+
+  const data = await fetchJSON(`${ESPN_SCOREBOARD}?dates=${dateStr}-${endStr}`);
+  const events = data.events || [];
+
+  const keywords = {
+    'Masters': ['masters'],
+    'PGA Championship': ['pga championship'],
+    'U.S. Open': ['u.s. open', 'us open'],
+    'Open Championship': ['open championship', 'the open', 'british open'],
+  };
+
+  const searchTerms = keywords[tournamentName] || [tournamentName.toLowerCase()];
+  for (const event of events) {
+    const name = (event.name || '').toLowerCase();
+    if (searchTerms.some((term) => name.includes(term))) {
+      return event.id;
+    }
+  }
+  return null;
 }
 
 export default async function handler(req) {
@@ -49,22 +64,19 @@ export default async function handler(req) {
       return Response.json({ message: 'No upcoming tournament' });
     }
 
-    const slashTournId = SLASH_GOLF_TOURNS[tournament.name];
-    if (!slashTournId) {
-      return Response.json({ message: `No Slash Golf mapping for ${tournament.name}` });
+    const espnEventId = await findEspnEventId(tournament.name, tournament.start_date);
+    if (!espnEventId) {
+      return Response.json({ message: `Could not find ESPN event for ${tournament.name}` });
     }
 
     const year = new Date(tournament.start_date).getFullYear().toString();
+    const compBase = `${ESPN_BASE}/events/${espnEventId}/competitions/${espnEventId}`;
 
-    // Fetch leaderboard/field from Slash Golf
-    const leaderboard = await slashGolfFetch('/leaderboard', {
-      orgId: '1',
-      tournId: slashTournId,
-      year,
-    });
+    // Get all ESPN competitors
+    const compData = await fetchJSON(`${compBase}/competitors?limit=200`);
+    const competitors = compData.items || [];
 
-    const rows = leaderboard.leaderboardRows || [];
-    if (rows.length === 0) {
+    if (competitors.length === 0) {
       return Response.json({ message: 'No field data available' });
     }
 
@@ -73,8 +85,10 @@ export default async function handler(req) {
     const nameToPlayer = {};
     const lastNameToPlayers = {};
     for (const p of players || []) {
-      nameToPlayer[normalizeName(p.name)] = p;
-      const lastName = normalizeName(p.name.split(',')[0].trim());
+      const parts = p.name.split(',').map((s) => s.trim());
+      const key = normalizeName(parts.length > 1 ? `${parts[1]} ${parts[0]}` : parts[0]);
+      nameToPlayer[key] = p;
+      const lastName = normalizeName(parts[0]);
       if (!lastNameToPlayers[lastName]) lastNameToPlayers[lastName] = [];
       lastNameToPlayers[lastName].push(p);
     }
@@ -82,36 +96,51 @@ export default async function handler(req) {
     let updated = 0;
     const fieldPlayerIds = [];
 
-    for (const row of rows) {
-      const nameKey = normalizeName(`${row.lastName}, ${row.firstName}`);
-      let dbPlayer = nameToPlayer[nameKey];
+    // Resolve athlete names in batches of 10
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < competitors.length; i += BATCH_SIZE) {
+      const batch = competitors.slice(i, i + BATCH_SIZE);
 
-      if (!dbPlayer) {
-        const lastName = normalizeName(row.lastName);
-        const firstName = normalizeName(row.firstName);
-        const candidates = lastNameToPlayers[lastName] || [];
-        for (const c of candidates) {
-          const cFirst = normalizeName(c.name.split(',')[1]?.trim() || '');
-          if (cFirst.startsWith(firstName) || firstName.startsWith(cFirst)) {
-            dbPlayer = c;
-            break;
+      const results = await Promise.allSettled(
+        batch.map(async (comp) => {
+          const espnId = comp.id;
+          const athlete = await fetchJSON(`${ESPN_BASE}/seasons/${year}/athletes/${espnId}`);
+          const espnName = normalizeName(athlete.displayName || athlete.fullName || '');
+
+          let dbPlayer = nameToPlayer[espnName];
+          if (!dbPlayer) {
+            const lastName = espnName.split(' ').pop();
+            const candidates = lastNameToPlayers[normalizeName(lastName)] || [];
+            for (const c of candidates) {
+              const cParts = c.name.split(',').map((s) => normalizeName(s.trim()));
+              const cFirst = cParts[1] || '';
+              const eFirst = espnName.split(' ')[0];
+              if (cFirst.startsWith(eFirst) || eFirst.startsWith(cFirst)) {
+                dbPlayer = c;
+                break;
+              }
+            }
           }
-        }
-      }
 
-      if (!dbPlayer) continue;
-
-      fieldPlayerIds.push(dbPlayer.id);
-
-      const { error } = await supabase.from('tournament_players').upsert(
-        {
-          tournament_id: tournament.id,
-          player_id: dbPlayer.id,
-          in_field: true,
-        },
-        { onConflict: 'tournament_id,player_id' }
+          return dbPlayer || null;
+        })
       );
-      if (!error) updated++;
+
+      for (const result of results) {
+        if (result.status !== 'fulfilled' || !result.value) continue;
+        const dbPlayer = result.value;
+        fieldPlayerIds.push(dbPlayer.id);
+
+        const { error } = await supabase.from('tournament_players').upsert(
+          {
+            tournament_id: tournament.id,
+            player_id: dbPlayer.id,
+            in_field: true,
+          },
+          { onConflict: 'tournament_id,player_id' }
+        );
+        if (!error) updated++;
+      }
     }
 
     // Mark players NOT in the field as out
@@ -126,8 +155,9 @@ export default async function handler(req) {
     return Response.json({
       success: true,
       tournament: tournament.name,
+      espnEventId,
       playersInField: updated,
-      totalFieldSize: rows.length,
+      totalFieldSize: competitors.length,
       timestamp: new Date().toISOString(),
     });
   } catch (err) {

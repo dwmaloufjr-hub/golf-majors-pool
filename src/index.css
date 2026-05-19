@@ -219,8 +219,30 @@ body {
 }
 
 .success-msg {
+  background: var(--green-light, #e6f4ea);
   color: var(--green-mid);
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
   font-weight: 600;
+}
+
+.forgot-password {
+  text-align: center;
+  margin-top: 0.5rem;
+}
+
+.forgot-password button {
+  background: none;
+  border: none;
+  color: var(--gray-500);
+  font-size: 0.8rem;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.forgot-password button:hover {
+  color: var(--green-mid);
 }
 
 /* ================================

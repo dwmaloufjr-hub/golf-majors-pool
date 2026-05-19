@@ -8,6 +8,7 @@ import Leaderboard from './pages/Leaderboard';
 import Rosters from './pages/Rosters';
 import Substitutions from './pages/Substitutions';
 import Scoring from './pages/Scoring';
+import ResetPassword from './pages/ResetPassword';
 
 function AppLayout({ children }) {
   return (
@@ -24,6 +25,7 @@ export default function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
           <Route
             path="/"
             element={
