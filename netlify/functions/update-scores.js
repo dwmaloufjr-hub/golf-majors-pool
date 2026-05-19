@@ -105,6 +105,14 @@ export default async function handler(req) {
   }
 
   try {
+    // Auto-activate: if an upcoming tournament's start_date has arrived, flip it to in_progress
+    const today = new Date().toISOString().slice(0, 10);
+    await supabase
+      .from('tournaments')
+      .update({ status: 'in_progress' })
+      .eq('status', 'upcoming')
+      .lte('start_date', today);
+
     // Find active tournament
     const { data: activeTournament } = await supabase
       .from('tournaments')
